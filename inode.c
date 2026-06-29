@@ -1,6 +1,29 @@
+/*
+ * Resizable simple ram filesystem for Linux.
+ *
+ * Copyright (C) 2000 Linus Torvalds.
+ *               2000 Transmeta Corp.
+ *
+ * Usage limits added by David Gibson, Linuxcare Australia.
+ * This file is released under the GPL.
+ */
+
+/*
+ * NOTE! This filesystem is probably most useful
+ * not as a real filesystem, but as an example of
+ * how virtual filesystems can be written.
+ *
+ * It doesn't get much simpler than this. Consider
+ * that this file implements the full semantics of
+ * a POSIX-compliant read-write filesystem.
+ *
+ * Note in particular how the filesystem does not
+ * need to implement any data structures of its own
+ * to keep track of the virtual data: using the VFS
+ * caches is sufficient.
+ */
 
 #include <linux/fs.h>
-#include <linux/mnt_idmapping.h> /*dbg*/
 #include <linux/pagemap.h>
 #include <linux/highmem.h>
 #include <linux/time.h>
@@ -18,41 +41,41 @@
 #include <linux/seq_file.h>
 #include "internal.h"
 
-struct nakafs_mount_opts {
+struct ramfs_mount_opts {
 	umode_t mode;
 };
 
-struct nakafs_fs_info {
-	struct nakafs_mount_opts mount_opts;
+struct ramfs_fs_info {
+	struct ramfs_mount_opts mount_opts;
 };
 
-#define FS_DEFAULT_MODE	0755
+#define RAMFS_DEFAULT_MODE	0755
 
-static const struct super_operations nakafs_ops;
-static const struct inode_operations nakafs_dir_inode_operations;
+static const struct super_operations ramfs_ops;
+static const struct inode_operations ramfs_dir_inode_operations;
 
-struct inode *nakafs_get_inode(struct super_block *sb,
+struct inode *ramfs_get_inode(struct super_block *sb,
 				const struct inode *dir, umode_t mode, dev_t dev)
 {
 	struct inode * inode = new_inode(sb);
 
 	if (inode) {
 		inode->i_ino = get_next_ino();
-		inode_init_owner(&nop_mnt_idmap, inode, dir, mode);
+		inode_init_owner(&init_user_ns, inode, dir, mode);
 		inode->i_mapping->a_ops = &ram_aops;
 		mapping_set_gfp_mask(inode->i_mapping, GFP_HIGHUSER);
 		mapping_set_unevictable(inode->i_mapping);
-		simple_inode_init_ts(inode);
+		inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
 		switch (mode & S_IFMT) {
 		default:
 			init_special_inode(inode, mode, dev);
 			break;
 		case S_IFREG:
-			inode->i_op = &nakafs_file_inode_operations;
-			inode->i_fop = &nakafs_file_operations;
+			inode->i_op = &ramfs_file_inode_operations;
+			inode->i_fop = &ramfs_file_operations;
 			break;
 		case S_IFDIR:
-			inode->i_op = &nakafs_dir_inode_operations;
+			inode->i_op = &ramfs_dir_inode_operations;
 			inode->i_fop = &simple_dir_operations;
 
 			/* directory inodes start off with i_nlink == 2 (for "." entry) */
@@ -72,144 +95,115 @@ struct inode *nakafs_get_inode(struct super_block *sb,
  */
 /* SMP-safe */
 static int
-nakafs_mknod(struct mnt_idmap *idmap, struct inode *dir,
+ramfs_mknod(struct user_namespace *mnt_userns, struct inode *dir,
 	    struct dentry *dentry, umode_t mode, dev_t dev)
 {
-	struct inode * inode = nakafs_get_inode(dir->i_sb, dir, mode, dev);
+	struct inode * inode = ramfs_get_inode(dir->i_sb, dir, mode, dev);
 	int error = -ENOSPC;
 
 	if (inode) {
-		error = security_inode_init_security(inode, dir,
-						     &dentry->d_name, NULL,
-						     NULL);
-		if (error) {
-			iput(inode);
-			goto out;
-		}
-
-		d_make_persistent(dentry, inode);
+		d_instantiate(dentry, inode);
+		dget(dentry);	/* Extra count - pin the dentry in core */
 		error = 0;
-		inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
+		dir->i_mtime = dir->i_ctime = current_time(dir);
 	}
-out:
 	return error;
 }
 
-static struct dentry *nakafs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-				 struct dentry *dentry, umode_t mode)
+static int ramfs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
+		       struct dentry *dentry, umode_t mode)
 {
-	int retval = nakafs_mknod(&nop_mnt_idmap, dir, dentry, mode | S_IFDIR, 0);
+	int retval = ramfs_mknod(&init_user_ns, dir, dentry, mode | S_IFDIR, 0);
 	if (!retval)
 		inc_nlink(dir);
-	return ERR_PTR(retval);
+	return retval;
 }
 
-static int nakafs_create(struct mnt_idmap *idmap, struct inode *dir,
+static int ramfs_create(struct user_namespace *mnt_userns, struct inode *dir,
 			struct dentry *dentry, umode_t mode, bool excl)
 {
-	return nakafs_mknod(&nop_mnt_idmap, dir, dentry, mode | S_IFREG, 0);
+	return ramfs_mknod(&init_user_ns, dir, dentry, mode | S_IFREG, 0);
 }
 
-static int nakafs_symlink(struct mnt_idmap *idmap, struct inode *dir,
+static int ramfs_symlink(struct user_namespace *mnt_userns, struct inode *dir,
 			 struct dentry *dentry, const char *symname)
 {
 	struct inode *inode;
 	int error = -ENOSPC;
 
-	inode = nakafs_get_inode(dir->i_sb, dir, S_IFLNK|S_IRWXUGO, 0);
+	inode = ramfs_get_inode(dir->i_sb, dir, S_IFLNK|S_IRWXUGO, 0);
 	if (inode) {
 		int l = strlen(symname)+1;
-
-		error = security_inode_init_security(inode, dir,
-						     &dentry->d_name, NULL,
-						     NULL);
-		if (error) {
-			iput(inode);
-			goto out;
-		}
-
 		error = page_symlink(inode, symname, l);
 		if (!error) {
-			d_make_persistent(dentry, inode);
-			inode_set_mtime_to_ts(dir,
-					      inode_set_ctime_current(dir));
+			d_instantiate(dentry, inode);
+			dget(dentry);
+			dir->i_mtime = dir->i_ctime = current_time(dir);
 		} else
 			iput(inode);
 	}
-out:
 	return error;
 }
 
-static int nakafs_tmpfile(struct mnt_idmap *idmap,
+static int ramfs_tmpfile(struct user_namespace *mnt_userns,
 			 struct inode *dir, struct file *file, umode_t mode)
 {
 	struct inode *inode;
-	int error;
 
-	inode = nakafs_get_inode(dir->i_sb, dir, mode, 0);
+	inode = ramfs_get_inode(dir->i_sb, dir, mode, 0);
 	if (!inode)
 		return -ENOSPC;
-
-	error = security_inode_init_security(inode, dir,
-					     &file_dentry(file)->d_name, NULL,
-					     NULL);
-	if (error) {
-		iput(inode);
-		goto out;
-	}
-
 	d_tmpfile(file, inode);
-out:
-	return finish_open_simple(file, error);
+	return finish_open_simple(file, 0);
 }
 
-static const struct inode_operations nakafs_dir_inode_operations = {
-	.create		= nakafs_create,
+static const struct inode_operations ramfs_dir_inode_operations = {
+	.create		= ramfs_create,
 	.lookup		= simple_lookup,
 	.link		= simple_link,
 	.unlink		= simple_unlink,
-	.symlink	= nakafs_symlink,
-	.mkdir		= nakafs_mkdir,
+	.symlink	= ramfs_symlink,
+	.mkdir		= ramfs_mkdir,
 	.rmdir		= simple_rmdir,
-	.mknod		= nakafs_mknod,
+	.mknod		= ramfs_mknod,
 	.rename		= simple_rename,
-	.tmpfile	= nakafs_tmpfile,
+	.tmpfile	= ramfs_tmpfile,
 };
 
 /*
  * Display the mount options in /proc/mounts.
  */
-static int nakafs_show_options(struct seq_file *m, struct dentry *root)
+static int ramfs_show_options(struct seq_file *m, struct dentry *root)
 {
-	struct nakafs_fs_info *fsi = root->d_sb->s_fs_info;
+	struct ramfs_fs_info *fsi = root->d_sb->s_fs_info;
 
-	if (fsi->mount_opts.mode != FS_DEFAULT_MODE)
+	if (fsi->mount_opts.mode != RAMFS_DEFAULT_MODE)
 		seq_printf(m, ",mode=%o", fsi->mount_opts.mode);
 	return 0;
 }
 
-static const struct super_operations nakafs_ops = {
+static const struct super_operations ramfs_ops = {
 	.statfs		= simple_statfs,
-	.drop_inode	= inode_just_drop,
-	.show_options	= nakafs_show_options,
+	.drop_inode	= generic_delete_inode,
+	.show_options	= ramfs_show_options,
 };
 
-enum nakafs_param {
+enum ramfs_param {
 	Opt_mode,
 };
 
-const struct fs_parameter_spec nakafs_fs_parameters[] = {
+const struct fs_parameter_spec ramfs_fs_parameters[] = {
 	fsparam_u32oct("mode",	Opt_mode),
 	{}
 };
 
-static int nakafs_parse_param(struct fs_context *fc, struct fs_parameter *param)
+static int ramfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 {
 	struct fs_parse_result result;
-	struct nakafs_fs_info *fsi = fc->s_fs_info;
+	struct ramfs_fs_info *fsi = fc->s_fs_info;
 	int opt;
 
-	opt = fs_parse(fc, nakafs_fs_parameters, param, &result);
+	opt = fs_parse(fc, ramfs_fs_parameters, param, &result);
 	if (opt == -ENOPARAM) {
 		opt = vfs_parse_fs_param_source(fc, param);
 		if (opt != -ENOPARAM)
@@ -234,20 +228,19 @@ static int nakafs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 	return 0;
 }
 
-static int nakafs_fill_super(struct super_block *sb, struct fs_context *fc)
+static int ramfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
-	struct nakafs_fs_info *fsi = sb->s_fs_info;
+	struct ramfs_fs_info *fsi = sb->s_fs_info;
 	struct inode *inode;
 
 	sb->s_maxbytes		= MAX_LFS_FILESIZE;
 	sb->s_blocksize		= PAGE_SIZE;
 	sb->s_blocksize_bits	= PAGE_SHIFT;
 	sb->s_magic		= RAMFS_MAGIC;
-	sb->s_op		= &nakafs_ops;
-	sb->s_d_flags		= DCACHE_DONTCACHE;
+	sb->s_op		= &ramfs_ops;
 	sb->s_time_gran		= 1;
 
-	inode = nakafs_get_inode(sb, NULL, S_IFDIR | fsi->mount_opts.mode, 0);
+	inode = ramfs_get_inode(sb, NULL, S_IFDIR | fsi->mount_opts.mode, 0);
 	sb->s_root = d_make_root(inode);
 	if (!sb->s_root)
 		return -ENOMEM;
@@ -255,52 +248,52 @@ static int nakafs_fill_super(struct super_block *sb, struct fs_context *fc)
 	return 0;
 }
 
-static int nakafs_get_tree(struct fs_context *fc)
+static int ramfs_get_tree(struct fs_context *fc)
 {
-	return get_tree_nodev(fc, nakafs_fill_super);
+	return get_tree_nodev(fc, ramfs_fill_super);
 }
 
-static void nakafs_free_fc(struct fs_context *fc)
+static void ramfs_free_fc(struct fs_context *fc)
 {
 	kfree(fc->s_fs_info);
 }
 
-static const struct fs_context_operations nakafs_context_ops = {
-	.free		= nakafs_free_fc,
-	.parse_param	= nakafs_parse_param,
-	.get_tree	= nakafs_get_tree,
+static const struct fs_context_operations ramfs_context_ops = {
+	.free		= ramfs_free_fc,
+	.parse_param	= ramfs_parse_param,
+	.get_tree	= ramfs_get_tree,
 };
 
-int nakafs_init_fs_context(struct fs_context *fc)
+int ramfs_init_fs_context(struct fs_context *fc)
 {
-	struct nakafs_fs_info *fsi;
+	struct ramfs_fs_info *fsi;
 
-	fsi = kzalloc_obj(*fsi);
+	fsi = kzalloc(sizeof(*fsi), GFP_KERNEL);
 	if (!fsi)
 		return -ENOMEM;
 
-	fsi->mount_opts.mode = FS_DEFAULT_MODE;
+	fsi->mount_opts.mode = RAMFS_DEFAULT_MODE;
 	fc->s_fs_info = fsi;
-	fc->ops = &nakafs_context_ops;
+	fc->ops = &ramfs_context_ops;
 	return 0;
 }
 
-void nakafs_kill_sb(struct super_block *sb)
+static void ramfs_kill_sb(struct super_block *sb)
 {
 	kfree(sb->s_fs_info);
-	kill_anon_super(sb);
+	kill_litter_super(sb);
 }
 
-static struct file_system_type nakafs_fs_type = {
-	.name		= "nakafs",
-	.init_fs_context = nakafs_init_fs_context,
-	.parameters	= nakafs_fs_parameters,
-	.kill_sb	= nakafs_kill_sb,
+static struct file_system_type ramfs_fs_type = {
+	.name		= "ramfs",
+	.init_fs_context = ramfs_init_fs_context,
+	.parameters	= ramfs_fs_parameters,
+	.kill_sb	= ramfs_kill_sb,
 	.fs_flags	= FS_USERNS_MOUNT,
 };
 
-static int __init init_nakafs_fs(void)
+static int __init init_ramfs_fs(void)
 {
-	return register_filesystem(&nakafs_fs_type);
+	return register_filesystem(&ramfs_fs_type);
 }
-fs_initcall(init_nakafs_fs);
+fs_initcall(init_ramfs_fs);
