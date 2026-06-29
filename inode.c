@@ -1,5 +1,6 @@
 
 #include <linux/fs.h>
+#include <linux/mnt_idmapping.h> /*dbg*/
 #include <linux/pagemap.h>
 #include <linux/highmem.h>
 #include <linux/time.h>
