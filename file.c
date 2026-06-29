@@ -10,13 +10,15 @@ static unsigned long nakafs_mmu_get_unmapped_area(struct file *file,
 		unsigned long addr, unsigned long len, unsigned long pgoff,
 		unsigned long flags)
 {
-	return mm_get_unmapped_area(file, addr, len, pgoff, flags);
+	return get_unmapped_area(file, addr, len, pgoff, flags);
+	/*return mm_get_unmapped_area(file, addr, len, pgoff, flags); dbg */
 }
 
 const struct file_operations nakafs_file_operations = {
 	.read_iter	= generic_file_read_iter,
 	.write_iter	= generic_file_write_iter,
-	.mmap_prepare	= generic_file_mmap_prepare,
+	/* .mmap_prepare	= generic_file_mmap_prepare, dbg */
+	.mmap	= generic_file_mmap,
 	.fsync		= noop_fsync,
 	.splice_read	= filemap_splice_read,
 	.splice_write	= iter_file_splice_write,
