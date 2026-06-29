@@ -298,3 +298,9 @@ static int __init init_ramfs_fs(void)
 	return register_filesystem(&ramfs_fs_type);
 }
 fs_initcall(init_ramfs_fs);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Developer unknown <test_hogehoge@gmail.com>");
+MODULE_DESCRIPTION("A Simple Test Kernel Module");
+MODULE_VERSION("1.0");
+
