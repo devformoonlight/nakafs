@@ -3,6 +3,29 @@
 # Makefile for the linux ramfs routines.
 #
 
-obj-y += nakafs.o
+MODNAME := nakafs
 
-nakafs-objs += inode.o file.o
+obj-m += ${MODNAME}.o
+
+KERNELRELEASE	?= $(shell uname -r)
+KDIR	?= /lib/modules/${KERNELRELEASE}/build
+MDIR	?= /lib/modules/${KERNELRELEASE}
+PWD	:= $(shell pwd)
+
+
+.PHONY : all clean install uninstall
+
+all:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+clean:
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
+
+install:
+	rm -f ${MDIR}/updates/${MODNAME}.ko
+	install -m644 -b -D ${MODNAME}.ko ${MDIR}/updates/${MODNAME}.ko
+	depmod -aq
+
+uninstall:
+	rm -f ${MDIR}/updates/${MODNAME}.ko
+	depmod -aq
