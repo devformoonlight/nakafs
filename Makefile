@@ -6,6 +6,7 @@
 MODNAME := nakafs
 
 obj-m += ${MODNAME}.o
+${MODNAME}-objs := file.o inode.o
 
 KERNELRELEASE	?= $(shell uname -r)
 KDIR	?= /lib/modules/${KERNELRELEASE}/build
