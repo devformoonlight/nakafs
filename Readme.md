@@ -1,14 +1,13 @@
 ## Linux karnel mod
 This is for my exercise.
+v6.1 kernel build env is needed.
 
 ```
 git clone --depth 1 https://github.com/devformoonlight/nakafs.git
 cd nakafsnakafs
 ```
 
-
 ```
-
 make
 sudo make install
 suo modprobe 
